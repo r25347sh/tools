@@ -37,11 +37,14 @@
   let isMuted         = false;
   let animationId     = null;
   let previousGain    = 1.2;
-  let gateThreshold   = 0.008;  // 低めにして声が通りやすく
+  // ヒステリシス付きソフトゲート（開閉のチャタリング防止）
+  let gateOpenThresh  = 0.012;
+  let gateCloseThresh = 0.005;
+  let gateIsOpen      = true;   // 開始時は開いておく
 
   // ========== Visualizer Config ==========
   const BAR_COUNT = 48;
-  const SMOOTHING = 0.72;
+  const SMOOTHING = 0.78;
 
   // ========== Utility ==========
   function setStatus(state, text) {
@@ -88,20 +91,20 @@
       highpassNode.frequency.value = 90;
       highpassNode.Q.value = 0.7;
 
-      // --- Noise Gate ---
-      // 最初は少し開けておく（完全クローズだと声が来ても開かないことがある）
-      gateGainNode.gain.value = 0.3;
+      // --- Soft Gate（最初は全開） ---
+      gateGainNode.gain.value = 1.0;
+      gateIsOpen = true;
 
       // --- User Gain ---
       const userGain = parseFloat(gainSlider.value);
       gainNode.gain.value = isMuted ? 0 : userGain;
 
-      // --- Compressor: 入力のむらを均す ---
-      compressorNode.threshold.value = -32;
-      compressorNode.knee.value      = 16;
-      compressorNode.ratio.value     = 4;    // 少し緩く
-      compressorNode.attack.value    = 0.003;
-      compressorNode.release.value   = 0.22;
+      // --- Compressor: むらを抑えるが、ポンピングしない程度に緩く ---
+      compressorNode.threshold.value = -24;
+      compressorNode.knee.value      = 20;
+      compressorNode.ratio.value     = 3;
+      compressorNode.attack.value    = 0.008;
+      compressorNode.release.value   = 0.25;
 
       // Analyser（ゲート判定 + 見た目用。再生経路には入れない）
       analyserNode.fftSize = 512;
@@ -192,15 +195,21 @@
       }
       const rms = Math.sqrt(sumSquares / timeData.length);
 
-      // スムージング
-      smoothedLevel = smoothedLevel * 0.82 + rms * 0.18;
+      // かなり強めにスムージング（音量の細かい揺らぎに反応しない）
+      smoothedLevel = smoothedLevel * 0.92 + rms * 0.08;
 
-      // --- Noise Gate ---
-      // 閾値超えで開く。閉じるときは完全に0にせず少し残す（声の頭切れ防止）
+      // --- Soft Gate with hysteresis ---
+      // 持続音声中に開閉を繰り返さないよう、開く閾値と閉じる閾値を分ける
       if (gateGainNode && !isMuted) {
-        const open = smoothedLevel > gateThreshold;
-        const target = open ? 1.0 : 0.05;  // 閉じてもわずかに通す
-        const timeConst = open ? 0.012 : 0.12;
+        if (!gateIsOpen && smoothedLevel > gateOpenThresh) {
+          gateIsOpen = true;
+        } else if (gateIsOpen && smoothedLevel < gateCloseThresh) {
+          gateIsOpen = false;
+        }
+
+        // 閉じても完全ミュートせず、ゆっくり減衰させる
+        const target = gateIsOpen ? 1.0 : 0.15;
+        const timeConst = gateIsOpen ? 0.02 : 0.25;  // 閉じるのは特にゆっくり
         gateGainNode.gain.setTargetAtTime(target, audioContext.currentTime, timeConst);
       }
 
