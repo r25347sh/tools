@@ -28,16 +28,20 @@
   let audioContext    = null;
   let mediaStream     = null;
   let sourceNode      = null;
-  let gainNode        = null;
+  let highpassNode    = null;
+  let gateGainNode    = null;   // noise gate
+  let gainNode        = null;   // user gain
+  let compressorNode  = null;
   let analyserNode    = null;
   let isRunning       = false;
   let isMuted         = false;
   let animationId     = null;
-  let previousGain    = 1.5;
+  let previousGain    = 1.2;
+  let gateThreshold   = 0.02;   // 0~1, lower = more open
 
   // ========== Visualizer Config ==========
   const BAR_COUNT = 48;
-  const SMOOTHING = 0.75;
+  const SMOOTHING = 0.72;
 
   // ========== Utility ==========
   function setStatus(state, text) {
@@ -55,14 +59,16 @@
       // 1. AudioContext
       audioContext = new (window.AudioContext || window.webkitAudioContext)();
 
-      // 2. getUserMedia with strong echo cancellation
+      // 2. getUserMedia
+      // autoGainControl は「むら」の原因になりやすいので OFF
+      // echoCancellation / noiseSuppression は ON のまま
       const constraints = {
         audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
+          echoCancellation: { ideal: true },
+          noiseSuppression: { ideal: true },
+          autoGainControl: false,          // 重要：むら対策
           channelCount: 1,
-          sampleRate: 48000
+          sampleRate: { ideal: 48000 }
         },
         video: false
       };
@@ -70,26 +76,48 @@
       mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
 
       // 3. Create nodes
-      sourceNode  = audioContext.createMediaStreamSource(mediaStream);
-      gainNode    = audioContext.createGain();
-      analyserNode = audioContext.createAnalyser();
+      sourceNode     = audioContext.createMediaStreamSource(mediaStream);
+      highpassNode   = audioContext.createBiquadFilter();
+      gateGainNode   = audioContext.createGain();
+      gainNode       = audioContext.createGain();
+      compressorNode = audioContext.createDynamicsCompressor();
+      analyserNode   = audioContext.createAnalyser();
 
-      // Analyser settings (balance quality vs performance)
-      analyserNode.fftSize = 256;
+      // --- Highpass: 低域の回り込み・振動をカット（ハウリング対策） ---
+      highpassNode.type = 'highpass';
+      highpassNode.frequency.value = 90;   // 90Hz以下を落とす
+      highpassNode.Q.value = 0.7;
+
+      // --- Noise Gate (簡易) ---
+      gateGainNode.gain.value = 0;         // 最初は閉じておく
+
+      // --- User Gain ---
+      const userGain = parseFloat(gainSlider.value);
+      gainNode.gain.value = isMuted ? 0 : userGain;
+
+      // --- Compressor: 入力のむらを均す ---
+      compressorNode.threshold.value = -28;  // dB
+      compressorNode.knee.value      = 12;
+      compressorNode.ratio.value     = 6;
+      compressorNode.attack.value    = 0.005;
+      compressorNode.release.value   = 0.18;
+
+      // Analyser
+      analyserNode.fftSize = 512;
       analyserNode.smoothingTimeConstant = SMOOTHING;
 
-      // 4. Connect: Mic → Gain → Analyser → Speakers
-      sourceNode.connect(gainNode);
-      gainNode.connect(analyserNode);
+      // 4. Connect graph
+      // Mic → Highpass → Gate → UserGain → Compressor → Analyser → Speakers
+      sourceNode.connect(highpassNode);
+      highpassNode.connect(gateGainNode);
+      gateGainNode.connect(gainNode);
+      gainNode.connect(compressorNode);
+      compressorNode.connect(analyserNode);
       analyserNode.connect(audioContext.destination);
-
-      // 5. Apply current gain
-      const gain = parseFloat(gainSlider.value);
-      gainNode.gain.setValueAtTime(isMuted ? 0 : gain, audioContext.currentTime);
 
       isRunning = true;
       updateUIRunning(true);
-      startVisualizer();
+      startVisualizer();   // ゲート制御もここで回す
 
       setStatus('active', '拡声中');
     } catch (err) {
@@ -105,19 +133,16 @@
       animationId = null;
     }
 
-    // Disconnect and clean up
-    if (sourceNode) {
-      sourceNode.disconnect();
-      sourceNode = null;
-    }
-    if (gainNode) {
-      gainNode.disconnect();
-      gainNode = null;
-    }
-    if (analyserNode) {
-      analyserNode.disconnect();
-      analyserNode = null;
-    }
+    // Disconnect and clean up all nodes
+    [sourceNode, highpassNode, gateGainNode, gainNode, compressorNode, analyserNode]
+      .forEach(node => {
+        if (node) {
+          try { node.disconnect(); } catch (_) {}
+        }
+      });
+
+    sourceNode = highpassNode = gateGainNode = gainNode = compressorNode = analyserNode = null;
+
     if (mediaStream) {
       mediaStream.getTracks().forEach(track => track.stop());
       mediaStream = null;
@@ -137,57 +162,80 @@
     meterFill.style.width = '0%';
   }
 
-  // ========== Visualizer ==========
+  // ========== Visualizer + Noise Gate ==========
   function startVisualizer() {
     const bufferLength = analyserNode.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
+    const freqData = new Uint8Array(bufferLength);
+    const timeData = new Uint8Array(analyserNode.fftSize);
+
+    // ゲート用スムージング
+    let smoothedLevel = 0;
 
     function draw() {
       if (!isRunning || !analyserNode) return;
 
       animationId = requestAnimationFrame(draw);
-      analyserNode.getByteFrequencyData(dataArray);
 
-      // Calculate average level
-      let sum = 0;
-      for (let i = 0; i < bufferLength; i++) {
-        sum += dataArray[i];
+      // 周波数データ（見た目用）
+      analyserNode.getByteFrequencyData(freqData);
+
+      // 時間領域データ（ゲート判定用・より正確）
+      analyserNode.getByteTimeDomainData(timeData);
+
+      // RMS レベル計算（むらに強い）
+      let sumSquares = 0;
+      for (let i = 0; i < timeData.length; i++) {
+        const v = (timeData[i] - 128) / 128;
+        sumSquares += v * v;
       }
-      const average = sum / bufferLength;
-      const levelPercent = Math.min(100, Math.round((average / 255) * 140));
+      const rms = Math.sqrt(sumSquares / timeData.length);
 
+      // スムージング
+      smoothedLevel = smoothedLevel * 0.82 + rms * 0.18;
+
+      // --- Noise Gate ---
+      // 閾値を超えたら開ける。ヒステリシスでチャタリング防止
+      if (gateGainNode && !isMuted) {
+        const open = smoothedLevel > gateThreshold;
+        const target = open ? 1 : 0;
+        // 攻撃は速く、リリースは少しゆっくり
+        const timeConst = open ? 0.015 : 0.08;
+        gateGainNode.gain.setTargetAtTime(target, audioContext.currentTime, timeConst);
+      }
+
+      // 表示用レベル（0-100%）
+      const levelPercent = Math.min(100, Math.round(smoothedLevel * 280));
       levelValue.textContent = levelPercent + '%';
       meterFill.style.width = levelPercent + '%';
 
-      // Logical size (CSS pixels)
+      // --- Draw bars ---
       const width = canvas.clientWidth;
       const height = canvas.clientHeight;
       const barWidth = width / BAR_COUNT;
       const gap = 2;
 
-      // Clear using actual buffer size
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // Background subtle grid
-      ctx.fillStyle = 'rgba(255,255,255,0.02)';
+      // subtle grid
+      ctx.fillStyle = 'rgba(255,255,255,0.025)';
       for (let i = 0; i < 4; i++) {
         const y = height * (i + 1) / 5;
         ctx.fillRect(0, y, width, 1);
       }
 
       for (let i = 0; i < BAR_COUNT; i++) {
-        // Focus on lower-mid frequencies (voice range)
-        const dataIndex = Math.floor(i * (bufferLength * 0.6) / BAR_COUNT);
-        const value = dataArray[dataIndex] / 255;
-        const barHeight = Math.max(1, value * height * 0.9);
+        // 声帯域寄りにマッピング
+        const dataIndex = Math.floor(i * (bufferLength * 0.55) / BAR_COUNT);
+        const value = freqData[dataIndex] / 255;
+        const barHeight = Math.max(1, value * height * 0.88);
 
         let color;
-        if (value > 0.75) {
-          color = `rgba(239, 68, 68, ${0.7 + value * 0.3})`;
-        } else if (value > 0.45) {
+        if (value > 0.72) {
+          color = `rgba(239, 68, 68, ${0.75 + value * 0.25})`;
+        } else if (value > 0.42) {
           color = `rgba(245, 158, 11, ${0.6 + value * 0.3})`;
         } else {
-          color = `rgba(34, 197, 94, ${0.4 + value * 0.5})`;
+          color = `rgba(34, 197, 94, ${0.35 + value * 0.5})`;
         }
 
         ctx.fillStyle = color;
@@ -277,12 +325,12 @@
   });
 
   resetBtn.addEventListener('click', () => {
-    gainSlider.value = 1.5;
-    updateGainDisplay(1.5);
+    gainSlider.value = 1.2;
+    updateGainDisplay(1.2);
 
     if (gainNode && !isMuted) {
       gainNode.gain.cancelScheduledValues(audioContext.currentTime);
-      gainNode.gain.setTargetAtTime(1.5, audioContext.currentTime, 0.05);
+      gainNode.gain.setTargetAtTime(1.2, audioContext.currentTime, 0.05);
     }
   });
 
