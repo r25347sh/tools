@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="description" content="ブラウザだけで動く高性能ウェブ拡声器">
+  <meta name="theme-color" content="#0f0f0f">
+  <title>Web拡声器</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="logo">
+        <span class="logo-icon">📢</span>
+        <h1>Web拡声器</h1>
+      </div>
+      <p class="subtitle">高性能・低遅延マイクアンプ</p>
+    </header>
+
+    <main class="main">
+      <!-- ステータス表示 -->
+      <section class="status-panel">
+        <div class="status-indicator" id="statusIndicator">
+          <span class="status-dot"></span>
+          <span class="status-text" id="statusText">待機中</span>
+        </div>
+        <div class="level-display">
+          <span class="level-label">LEVEL</span>
+          <span class="level-value" id="levelValue">0%</span>
+        </div>
+      </section>
+
+      <!-- ビジュアライザー -->
+      <section class="visualizer-section">
+        <canvas id="visualizer" width="600" height="160"></canvas>
+        <div class="meter-bar">
+          <div class="meter-fill" id="meterFill"></div>
+        </div>
+      </section>
+
+      <!-- メインコントロール -->
+      <section class="controls">
+        <button id="toggleBtn" class="btn-main" aria-label="拡声開始/停止">
+          <span class="btn-icon" id="btnIcon">▶</span>
+          <span class="btn-label" id="btnLabel">拡声開始</span>
+        </button>
+
+        <div class="control-group">
+          <label for="gainSlider" class="control-label">
+            <span>ゲイン</span>
+            <span class="control-value" id="gainValue">1.0x</span>
+          </label>
+          <input type="range" id="gainSlider" min="0" max="8" step="0.1" value="1.5">
+        </div>
+
+        <div class="control-row">
+          <button id="muteBtn" class="btn-secondary" aria-label="ミュート">
+            <span id="muteIcon">🔊</span>
+            <span>ミュート</span>
+          </button>
+          <button id="resetBtn" class="btn-secondary" aria-label="リセット">
+            <span>↺</span>
+            <span>リセット</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- 注意書き -->
+      <section class="notice">
+        <h3>⚠️ 重要</h3>
+        <ul>
+          <li>スピーカー出力時は<strong>ハウリング</strong>に注意してください</li>
+          <li><strong>ヘッドホン推奨</strong>（特に室内）</li>
+          <li>マイクへの許可を求められたら「許可」を選択</li>
+          <li>HTTPS環境またはlocalhostでのみ動作します</li>
+        </ul>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>Web Audio API · ローカル処理 · データ送信なし</p>
+    </footer>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
