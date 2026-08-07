@@ -3,7 +3,6 @@
  * Web Audio API + getUserMedia
  */
 
-
 (() => {
   'use strict';
 
@@ -38,7 +37,7 @@
   let isMuted         = false;
   let animationId     = null;
   let previousGain    = 1.2;
-  let gateThreshold   = 0.02;   // 0~1, lower = more open
+  let gateThreshold   = 0.008;  // 低めにして声が通りやすく
 
   // ========== Visualizer Config ==========
   const BAR_COUNT = 48;
@@ -86,39 +85,41 @@
 
       // --- Highpass: 低域の回り込み・振動をカット（ハウリング対策） ---
       highpassNode.type = 'highpass';
-      highpassNode.frequency.value = 90;   // 90Hz以下を落とす
+      highpassNode.frequency.value = 90;
       highpassNode.Q.value = 0.7;
 
-      // --- Noise Gate (簡易) ---
-      gateGainNode.gain.value = 0;         // 最初は閉じておく
+      // --- Noise Gate ---
+      // 最初は少し開けておく（完全クローズだと声が来ても開かないことがある）
+      gateGainNode.gain.value = 0.3;
 
       // --- User Gain ---
       const userGain = parseFloat(gainSlider.value);
       gainNode.gain.value = isMuted ? 0 : userGain;
 
       // --- Compressor: 入力のむらを均す ---
-      compressorNode.threshold.value = -28;  // dB
-      compressorNode.knee.value      = 12;
-      compressorNode.ratio.value     = 6;
-      compressorNode.attack.value    = 0.005;
-      compressorNode.release.value   = 0.18;
+      compressorNode.threshold.value = -32;
+      compressorNode.knee.value      = 16;
+      compressorNode.ratio.value     = 4;    // 少し緩く
+      compressorNode.attack.value    = 0.003;
+      compressorNode.release.value   = 0.22;
 
-      // Analyser
+      // Analyser（ゲート判定 + 見た目用。再生経路には入れない）
       analyserNode.fftSize = 512;
       analyserNode.smoothingTimeConstant = SMOOTHING;
 
       // 4. Connect graph
-      // Mic → Highpass → Gate → UserGain → Compressor → Analyser → Speakers
+      // Mic → Highpass ┬→ Analyser（監視専用）
+      //               └→ Gate → UserGain → Compressor → Speakers
       sourceNode.connect(highpassNode);
+      highpassNode.connect(analyserNode);   // ゲート前の信号を監視
       highpassNode.connect(gateGainNode);
       gateGainNode.connect(gainNode);
       gainNode.connect(compressorNode);
-      compressorNode.connect(analyserNode);
-      analyserNode.connect(audioContext.destination);
+      compressorNode.connect(audioContext.destination);
 
       isRunning = true;
       updateUIRunning(true);
-      startVisualizer();   // ゲート制御もここで回す
+      startVisualizer();
 
       setStatus('active', '拡声中');
     } catch (err) {
@@ -195,12 +196,11 @@
       smoothedLevel = smoothedLevel * 0.82 + rms * 0.18;
 
       // --- Noise Gate ---
-      // 閾値を超えたら開ける。ヒステリシスでチャタリング防止
+      // 閾値超えで開く。閉じるときは完全に0にせず少し残す（声の頭切れ防止）
       if (gateGainNode && !isMuted) {
         const open = smoothedLevel > gateThreshold;
-        const target = open ? 1 : 0;
-        // 攻撃は速く、リリースは少しゆっくり
-        const timeConst = open ? 0.015 : 0.08;
+        const target = open ? 1.0 : 0.05;  // 閉じてもわずかに通す
+        const timeConst = open ? 0.012 : 0.12;
         gateGainNode.gain.setTargetAtTime(target, audioContext.currentTime, timeConst);
       }
 
